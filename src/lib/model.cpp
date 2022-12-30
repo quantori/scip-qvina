@@ -557,16 +557,46 @@ std::string coords_to_pdbqt_string(const vec& coords, const std::string& str) {
 	return tmp;
 }
 
-void model::write_context(const context& c, ofile& out) const {
+std::string model::write_context(const context& c, ofile& out) const {
 	verify_bond_lengths();
+	std::string data;
 	VINA_FOR_IN(i, c) {
 		const std::string& str = c[i].first;
 		if(c[i].second) {
+            const std::string& str1 = c[i].first;
+            data.append(coords_to_pdbqt_string(coords[c[i].second.get()], str));
+            data.append("\n");
+            //std::cout << coords_to_pdbqt_string(coords[c[i].second.get()], str) << std::endl;
 			out << coords_to_pdbqt_string(coords[c[i].second.get()], str) << '\n';
 		}
-		else
-			out << str << '\n';
+		else {
+            //std::cout << str << std::endl;
+            data.append(str);
+            data.append("\n");
+            out << str << '\n';
+        }
 	}
+    return data;
+}
+
+std::string model::write_context(const context& c) const {
+    verify_bond_lengths();
+    std::string data;
+    VINA_FOR_IN(i, c) {
+        const std::string& str = c[i].first;
+        if(c[i].second) {
+            const std::string& str1 = c[i].first;
+            data.append(coords_to_pdbqt_string(coords[c[i].second.get()], str));
+            data.append("\n");
+            //std::cout << coords_to_pdbqt_string(coords[c[i].second.get()], str) << std::endl;
+        }
+        else {
+            //std::cout << str << std::endl;
+            data.append(str);
+            data.append("\n");
+        }
+    }
+    return data;
 }
 
 void model::seti(const conf& c) {

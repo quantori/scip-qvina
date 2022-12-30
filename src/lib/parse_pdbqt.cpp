@@ -235,6 +235,19 @@ struct parsing_struct {
 	}
 };
 
+bool get_buf_line(std::string& a, std::string& b){
+    b.clear();
+    if (a.empty()){
+        return false;
+    }
+    for (int i = 0; a[i] != '\n'; i++){
+        b.push_back(a[i]);
+    }
+    b.push_back('\n');
+    a.erase(0, b.size());
+    return true;
+}
+
 unsigned parse_one_unsigned(const std::string& str, const std::string& start, unsigned count) {
 	std::istringstream in_str(str.substr(start.size()));
 	int tmp;
@@ -282,6 +295,32 @@ void parse_pdbqt_rigid(const path& name, rigid& r) {
 	}
 }
 
+void parse_buf_root_aux(std::string& name, unsigned& count, parsing_struct& p, context& c) {
+    std::string str;
+    while(get_buf_line(name, str)) {
+        add_context(c, str);
+        ++count;
+        if(str.empty()) {} // ignore ""
+        else if(starts_with(str, "WARNING")) {} // ignore - AutoDockTools bug workaround
+        else if(starts_with(str, "REMARK")) {} // ignore
+        else if(starts_with(str, "ATOM  ") || starts_with(str, "HETATM")) {
+            try {
+                p.add(parse_pdbqt_atom_string(str), c);
+            }
+            catch(atom_syntax_error& e) {
+                throw stream_parse_error(count, "ATOM syntax incorrect: " + e.nature);
+            }
+            catch(...) {
+                throw stream_parse_error(count, "ATOM syntax incorrect");
+            }
+        }
+        else if(starts_with(str, "ENDROOT")) return;
+        else if(starts_with(str, "MODEL"))
+            throw stream_parse_error(count, "Unexpected multi-MODEL input. Use \"vina_split\" first?");
+        else throw stream_parse_error(count, "Unknown or inappropriate tag");
+    }
+}
+
 
 void parse_pdbqt_root_aux(std::istream& in, unsigned& count, parsing_struct& p, context& c) {
 	std::string str;
@@ -309,6 +348,24 @@ void parse_pdbqt_root_aux(std::istream& in, unsigned& count, parsing_struct& p, 
 	}
 }
 
+void parse_buf_root(std::string& name, unsigned& count, parsing_struct& p, context& c) {
+    std::string str;
+    while(get_buf_line(name, str)) {
+        add_context(c, str);
+        ++count;
+        if(str.empty()) {} // ignore
+        else if(starts_with(str, "WARNING")) {} // ignore - AutoDockTools bug workaround
+        else if(starts_with(str, "REMARK")) {} // ignore
+        else if(starts_with(str, "ROOT")) {
+            parse_buf_root_aux(name, count, p, c);
+            break;
+        }
+        else if(starts_with(str, "MODEL"))
+            throw stream_parse_error(count, "Unexpected multi-MODEL input. Use \"vina_split\" first?");
+        else throw stream_parse_error(count, "Unknown or inappropriate tag");
+    }
+}
+
 void parse_pdbqt_root(std::istream& in, unsigned& count, parsing_struct& p, context& c) {
 	std::string str;
 	while(std::getline(in, str)) {
@@ -327,7 +384,21 @@ void parse_pdbqt_root(std::istream& in, unsigned& count, parsing_struct& p, cont
 	}
 }
 
-void parse_pdbqt_branch(std::istream& in, unsigned& count, parsing_struct& p, context& c, unsigned from, unsigned to); // forward declaration
+void parse_pdbqt_branch(std::istream& in, unsigned& count, parsing_struct& p, context& c, unsigned from, unsigned to);// forward declaration
+void parse_buf_branch(std::string& name, unsigned& count, parsing_struct& p, context& c, unsigned from, unsigned to);
+void parse_buf_branch_aux(std::string& name, unsigned& count, const std::string& str, parsing_struct& p, context& c) {
+    unsigned first, second;
+    parse_two_unsigneds(str, "BRANCH", count, first, second);
+    sz i = 0;
+    for(; i < p.atoms.size(); ++i)
+        if(p.atoms[i].a.number == first) {
+            p.atoms[i].ps.push_back(parsing_struct());
+            parse_buf_branch(name, count, p.atoms[i].ps.back(), c, first, second);
+            break;
+        }
+    if(i == p.atoms.size())
+        throw stream_parse_error(count, "No atom number " + boost::lexical_cast<std::string>(first) + " in this branch");
+}
 
 void parse_pdbqt_branch_aux(std::istream& in, unsigned& count, const std::string& str, parsing_struct& p, context& c) {
 	unsigned first, second;
@@ -342,6 +413,28 @@ void parse_pdbqt_branch_aux(std::istream& in, unsigned& count, const std::string
 	if(i == p.atoms.size())
 		throw stream_parse_error(count, "No atom number " + boost::lexical_cast<std::string>(first) + " in this branch");
 }
+void parse_buf_aux(std::string& name, unsigned& count, parsing_struct& p, context& c, boost::optional<unsigned>& torsdof, bool residue) {
+    parse_buf_root(name, count, p, c);
+
+    std::string str;
+    while(get_buf_line(name, str)) {
+        add_context(c, str);
+        ++count;
+        if(str.empty()) {} // ignore ""
+        else if(starts_with(str, "WARNING")) {} // ignore - AutoDockTools bug workaround
+        else if(starts_with(str, "REMARK")) {} // ignore
+        else if(starts_with(str, "BRANCH")) parse_buf_branch_aux(name, count, str, p, c);
+        else if(!residue && starts_with(str, "TORSDOF")) {
+            if(torsdof) throw stream_parse_error(count, "TORSDOF can occur only once");
+            torsdof = parse_one_unsigned(str, "TORSDOF", count);
+        }
+        else if(residue && starts_with(str, "END_RES")) return;
+        else if(starts_with(str, "MODEL"))
+            throw stream_parse_error(count, "Unexpected multi-MODEL input. Use \"vina_split\" first?");
+        else throw stream_parse_error(count, "Unknown or inappropriate tag");
+    }
+}
+
 
 void parse_pdbqt_aux(std::istream& in, unsigned& count, parsing_struct& p, context& c, boost::optional<unsigned>& torsdof, bool residue) {
 	parse_pdbqt_root(in, count, p, c);
@@ -409,8 +502,8 @@ void postprocess_branch(non_rigid_parsed& nr, parsing_struct& p, context& c, B& 
 	VINA_FOR_IN(i, p.atoms) {  // postprocess atoms into 'b.node'
 		parsing_struct::node& p_node = p.atoms[i];
 		if(p.immobile_atom && i == p.immobile_atom.get()) {} // skip immobile_atom - it's already inserted in "THERE"
-		else p_node.insert(nr, c, b.node.get_origin());
-		p_node.insert_immobiles(nr, c, b.node.get_origin());
+		/*else*/ p_node.insert(nr, c, b.node.get_origin());
+		/*p_node.insert_immobiles(nr, c, b.node.get_origin());*/
 	}
 	b.node.end = nr.atoms.size();
 
@@ -468,6 +561,24 @@ void postprocess_residue(non_rigid_parsed& nr, parsing_struct& p, context& c) {
 	VINA_CHECK(nr.atoms_inflex_bonds.dim_2() == nr.inflex.size());
 }
 
+void parse_buf_ligand( std::string& name, non_rigid_parsed& nr, context& c) {
+    unsigned count = 0;
+    parsing_struct p;
+    boost::optional<unsigned> torsdof;
+    try {
+        parse_buf_aux(name, count, p, c, torsdof, false);
+        if(p.atoms.empty())
+            throw parse_error(name, count, "No atoms in the ligand");
+        if(!torsdof)
+            throw parse_error(name, count, "Missing TORSDOF");
+        postprocess_ligand(nr, p, c, unsigned(torsdof.get())); // bizarre size_t -> unsigned compiler complaint
+    }
+    catch(stream_parse_error& e) {
+        throw e.to_parse_error(name);
+    }
+    VINA_CHECK(nr.atoms_atoms_bonds.dim() == nr.atoms.size());
+}
+
 void parse_pdbqt_ligand(const path& name, non_rigid_parsed& nr, context& c) {
 	ifile in(name);
 	unsigned count = 0;
@@ -518,6 +629,44 @@ void parse_pdbqt_flex(const path& name, non_rigid_parsed& nr, context& c) {
 		else throw parse_error(name, count, "Unknown or inappropriate tag");
 	}
 	VINA_CHECK(nr.atoms_atoms_bonds.dim() == nr.atoms.size());
+}
+
+void parse_buf_branch(std::string& name, unsigned& count, parsing_struct& p, context& c, unsigned from, unsigned to) {
+    std::string str;
+    while(get_buf_line(name, str)) {
+        add_context(c, str);
+        ++count;
+        if(str.empty()) {} //ignore ""
+        else if(starts_with(str, "WARNING")) {} // ignore - AutoDockTools bug workaround
+        else if(starts_with(str, "REMARK")) {} // ignore
+        else if(starts_with(str, "BRANCH")) parse_buf_branch_aux(name, count, str, p, c);
+        else if(starts_with(str, "ENDBRANCH")) {
+            unsigned first, second;
+            parse_two_unsigneds(str, "ENDBRANCH", count, first, second);
+            if(first != from || second != to)
+                throw stream_parse_error(count, "Inconsistent branch numbers");
+            if(!p.immobile_atom)
+                throw stream_parse_error(count, "Atom " + boost::lexical_cast<std::string>(to) + " has not been found in this branch");
+            return;
+        }
+        else if(starts_with(str, "ATOM  ") || starts_with(str, "HETATM")) {
+            try {
+                parsed_atom a = parse_pdbqt_atom_string(str);
+                if(a.number == to)
+                    p.immobile_atom = p.atoms.size();
+                p.add(a, c);
+            }
+            catch(atom_syntax_error& e) {
+                throw stream_parse_error(count, "ATOM syntax incorrect: " + e.nature);
+            }
+            catch(...) {
+                throw stream_parse_error(count, "ATOM syntax incorrect");
+            }
+        }
+        else if(starts_with(str, "MODEL"))
+            throw stream_parse_error(count, "Unexpected multi-MODEL input. Use \"vina_split\" first?");
+        else throw stream_parse_error(count, "Unknown or inappropriate tag");
+    }
 }
 
 void parse_pdbqt_branch(std::istream& in, unsigned& count, parsing_struct& p, context& c, unsigned from, unsigned to) {
@@ -614,6 +763,17 @@ struct pdbqt_initializer {
 		m.initialize(mobility);
 	}
 };
+
+model parse_ligand_buffer(std::string name){ // can throw parse_error
+    non_rigid_parsed nrp;
+    context c;
+    parse_buf_ligand(name, nrp, c);
+
+    pdbqt_initializer tmp;
+    tmp.initialize_from_nrp(nrp, c, true);
+    tmp.initialize(nrp.mobility_matrix());
+    return tmp.m;
+}
 
 model parse_ligand_pdbqt  (const path& name) { // can throw parse_error
 	non_rigid_parsed nrp;

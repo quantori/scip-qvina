@@ -14,12 +14,12 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 
-   Author: Dr. Oleg Trott <ot14@columbia.edu>, 
-           The Olson Lab, 
+   Author: Dr. Oleg Trott <ot14@columbia.edu>,
+           The Olson Lab,
            The Scripps Research Institute
 
 */
-
+#include <stdlib.h>
 #include <iostream>
 #include <string>
 #include <exception>
@@ -49,6 +49,13 @@
 using boost::filesystem::path;
 using namespace boost::posix_time;
 
+struct resultData{
+    char** pdbqtFormatData;
+    fl** resArray;
+    int count;
+    int* len;
+};
+typedef resultData res;
 path make_path(const std::string& str) {
 	return path(str);
 }
@@ -75,15 +82,33 @@ std::string default_output(const std::string& input_name) {
 
 void write_all_output(model& m, const output_container& out, sz how_many,
 				  const std::string& output_name,
-				  const std::vector<std::string>& remarks) {
+				  const std::vector<std::string>& remarks, std::vector<std::string>& res) {
 	if(out.size() < how_many)
 		how_many = out.size();
 	VINA_CHECK(how_many <= remarks.size());
 	ofile f(make_path(output_name));
+	std::string data;
 	VINA_FOR(i, how_many) {
+	    data.clear();
 		m.set(out[i].c);
-		m.write_model(f, i+1, remarks[i]); // so that model numbers start with 1
+		m.write_model(f, i+1, remarks[i], data); // so that model numbers start with 1
+	    res.push_back(data);
 	}
+}
+
+void write_buff_output(model& m, const output_container& out, sz how_many,
+                      const std::string& output_name,
+                      const std::vector<std::string>& remarks, std::vector<std::string>& res) {
+    if(out.size() < how_many)
+        how_many = out.size();
+    VINA_CHECK(how_many <= remarks.size());
+    std::string data;
+    VINA_FOR(i, how_many) {
+        data.clear();
+        m.set(out[i].c);
+        m.write_model(i+1, remarks[i], data); // so that model numbers start with 1
+        res.push_back(data);
+    }
 }
 
 void do_randomization(model& m,
@@ -138,7 +163,7 @@ std::string vina_remark(fl e, fl lb, fl ub) {
 	std::ostringstream remark;
 	remark.setf(std::ios::fixed, std::ios::floatfield);
 	remark.setf(std::ios::showpoint);
-	remark << "REMARK VINA RESULT: " 
+	remark << "REMARK VINA RESULT: "
 		                << std::setw(9) << std::setprecision(1) << e
 	                    << "  " << std::setw(9) << std::setprecision(3) << lb
 						<< "  " << std::setw(9) << std::setprecision(3) << ub
@@ -153,12 +178,14 @@ output_container remove_redundant(const output_container& in, fl min_rmsd) {
 	return tmp;
 }
 
-void do_search(model& m, const boost::optional<model>& ref, const scoring_function& sf, const precalculate& prec, const igrid& ig, const precalculate& prec_widened, const igrid& ig_widened, non_cache& nc, // nc.slope is changed
+res* do_search(model& m, const boost::optional<model>& ref, const scoring_function& sf, const precalculate& prec, const igrid& ig, const precalculate& prec_widened, const igrid& ig_widened, non_cache& nc, // nc.slope is changed
 			   const std::string& out_name,
 			   const vec& corner1, const vec& corner2,
 			   const parallel_mc& par, fl energy_range, sz num_modes,
 			   int seed, int verbosity, bool score_only, bool local_only, tee& log, const terms& t, const flv& weights) {
-	conf_size s = m.get_size();
+
+    res* resStruct;
+    conf_size s = m.get_size();
 	conf c = m.get_initial_conf();
 	fl e = max_fl;
 	const vec authentic_v(1000, 1000, 1000);
@@ -205,7 +232,8 @@ void do_search(model& m, const boost::optional<model>& ref, const scoring_functi
 		output_container out_cont;
 		out_cont.push_back(new output_type(out));
 		std::vector<std::string> remarks(1, vina_remark(e, 0, 0));
-		write_all_output(m, out_cont, 1, out_name, remarks); // how_many == 1
+		std::vector<std::string> plug;
+		write_all_output(m, out_cont, 1, out_name, remarks, plug); // how_many == 1
 		done(verbosity, log);
 	}
 	else {
@@ -242,7 +270,7 @@ void do_search(model& m, const boost::optional<model>& ref, const scoring_functi
 			const fl best_mode_intramolecular_energy = m.eval_intramolecular(prec, authentic_v, out_cont[0].c);
 			VINA_FOR_IN(i, out_cont)
 				if(not_max(out_cont[i].e))
-					out_cont[i].e = m.eval_adjusted(sf, prec, nc, authentic_v, out_cont[i].c, best_mode_intramolecular_energy); 
+					out_cont[i].e = m.eval_adjusted(sf, prec, nc, authentic_v, out_cont[i].c, best_mode_intramolecular_energy);
 			// the order must not change because of non-decreasing g (see paper), but we'll re-sort in case g is non strictly increasing
 			out_cont.sort();
 		}
@@ -265,23 +293,64 @@ void do_search(model& m, const boost::optional<model>& ref, const scoring_functi
 
 		sz how_many = 0;
 		std::vector<std::string> remarks;
+		fl result = 0;
+		//std::cerr << (out_cont).size() << std::endl;
+
+
+        int count = 0;
+        resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = 0;
+        resStruct->resArray = (fl**)(malloc(1 * sizeof(fl *)));
+        resStruct->resArray[0] = (fl*)(malloc(4*sizeof(fl)));
 		VINA_FOR_IN(i, out_cont) {
+            if (count > resStruct->count) {
+                resStruct->count += 1;
+                resStruct->resArray = (fl**)(realloc(resStruct->resArray, (resStruct->count+1)*sizeof(fl*)));
+                resStruct->resArray[resStruct->count] = (fl*)(malloc(4*sizeof(fl)));
+            }
 			if(how_many >= num_modes || !not_max(out_cont[i].e) || out_cont[i].e > out_cont[0].e + energy_range) break; // check energy_range sanity FIXME
 			++how_many;
+			if(i == 0 ) {
+				result=out_cont[i].e;
+			}
+            //std::cerr << i+1 << std::endl;
+            resStruct->resArray[resStruct->count][0] = i+1;
+            //resArray[i*4+1] = i+1;
 			log << std::setw(4) << i+1
 				<< "    " << std::setw(9) << std::setprecision(1) << out_cont[i].e; // intermolecular_energies[i];
+            //std::cerr << out_cont[i].e << std::endl;
+            resStruct->resArray[resStruct->count][1] = out_cont[i].e;
+            //resArray[i*4 +2] = out_cont[i].e;
 			m.set(out_cont[i].c);
 			const model& r = ref ? ref.get() : best_mode_model;
 			const fl lb = m.rmsd_lower_bound(r);
+			//std::cerr << lb << std::endl;
 			const fl ub = m.rmsd_upper_bound(r);
-			log << "  " << std::setw(9) << std::setprecision(3) << lb
+            //std::cerr << ub << std::endl;
+            resStruct->resArray[resStruct->count][2] = lb;
+            resStruct->resArray[resStruct->count][3] = ub;
+            count+=1;
+            //std::cerr << resArray[i*4+4] << std::endl;
+            log << "  " << std::setw(9) << std::setprecision(3) << lb
 			    << "  " << std::setw(9) << std::setprecision(3) << ub; // FIXME need user-readable error messages in case of failures
 
 			remarks.push_back(vina_remark(out_cont[i].e, lb, ub));
 			log.endl();
 		}
 		doing(verbosity, "Writing output", log);
-		write_all_output(m, out_cont, how_many, out_name, remarks);
+		std::vector<std::string> res;
+        if (out_name != ""){
+            write_all_output(m, out_cont, how_many, out_name, remarks, res);
+        } else {
+            write_buff_output(m, out_cont, how_many, out_name, remarks, res);
+        }
+		resStruct->len = (int*)(malloc(res.size()*sizeof(int)));
+		resStruct->pdbqtFormatData = (char**)(malloc(res.size()*sizeof(char *)));
+		for (int i = 0; i < res.size(); i++){
+		    resStruct->pdbqtFormatData[i] = (char*)(malloc((res[i].length()+1)*sizeof(char)));
+		    std::strcpy(resStruct->pdbqtFormatData[i], res[i].c_str());
+		    resStruct->len[i] = res[i].length();
+		}
 		done(verbosity, log);
 
 		if(how_many < 1) {
@@ -289,24 +358,25 @@ void do_search(model& m, const boost::optional<model>& ref, const scoring_functi
 				<< "WARNING: Check that it is large enough for all movable atoms, including those in the flexible side chains.";
 			log.endl();
 		}
+
 	}
+    return resStruct;
 }
 
-void main_procedure(model& m, const boost::optional<model>& ref, // m is non-const (FIXME?)
+res* main_procedure(model& m, const boost::optional<model>& ref, // m is non-const (FIXME?)
 			     const std::string& out_name,
 				 bool score_only, bool local_only, bool randomize_only, bool no_cache,
 				 const grid_dims& gd, int exhaustiveness,
 				 const flv& weights,
 				 int cpu, int seed, int verbosity, sz num_modes, fl energy_range, tee& log) {
-
+   res* resStruct;
 	doing(verbosity, "Setting up the scoring function", log);
-
 	everything t;
 	VINA_CHECK(weights.size() == 6);
 
 	weighted_terms wt(&t, weights);
 	precalculate prec(wt);
-	const fl left  = 0.25; 
+	const fl left  = 0.25;
 	const fl right = 0.25;
 	precalculate prec_widened(prec); prec_widened.widen(left, right);
 
@@ -335,7 +405,7 @@ void main_procedure(model& m, const boost::optional<model>& ref, // m is non-con
 		non_cache nc        (m, gd, &prec,         slope); // if gd has 0 n's, this will not constrain anything
 		non_cache nc_widened(m, gd, &prec_widened, slope); // if gd has 0 n's, this will not constrain anything
 		if(no_cache) {
-			do_search(m, ref, wt, prec, nc, prec_widened, nc_widened, nc,
+             resStruct = do_search(m, ref, wt, prec, nc, prec_widened, nc_widened, nc,
 					  out_name,
 					  corner1, corner2,
 					  par, energy_range, num_modes,
@@ -350,13 +420,16 @@ void main_procedure(model& m, const boost::optional<model>& ref, // m is non-con
 //			if(cache_needed) c.populateparalell(m, prec, m.get_movable_atom_types(prec.atom_typing_used()),false, cpu);
 			if(cache_needed) done(verbosity, log);
 			//TODO write the grid if requested to do
-			do_search(m, ref, wt, prec, c, prec, c, nc,
+			fl result=0;
+			resStruct = do_search(m, ref, wt, prec, c, prec, c, nc,
 					  out_name,
 					  corner1, corner2,
 					  par, energy_range, num_modes,
 					  seed, verbosity, score_only, local_only, log, t, weights);
+
 		}
 	}
+    return(resStruct);
 }
 
 struct usage_error : public std::runtime_error {
@@ -376,10 +449,10 @@ struct options_occurrence {
 
 options_occurrence get_occurrence(boost::program_options::variables_map& vm, boost::program_options::options_description& d) {
 	options_occurrence tmp;
-	VINA_FOR_IN(i, d.options()) 
-		if(vm.count((*d.options()[i]).long_name())) 
+	VINA_FOR_IN(i, d.options())
+		if(vm.count((*d.options()[i]).long_name()))
 			tmp.some = true;
-		else 
+		else
 			tmp.all = false;
 	return tmp;
 }
@@ -463,6 +536,7 @@ Thank you!\n";
 
 	try {
 		std::string rigid_name, ligand_name, flex_name, config_name, out_name, log_name;
+		std::string ligand_buffer = "";
 		fl center_x, center_y, center_z, size_x, size_y, size_z;
 		int cpu = 0, seed, exhaustiveness, verbosity = 2, num_modes = 9;
 		fl energy_range = 2.0;
@@ -483,6 +557,7 @@ Thank you!\n";
 			("receptor", value<std::string>(&rigid_name), "rigid part of the receptor (PDBQT)")
 			("flex", value<std::string>(&flex_name), "flexible side chains, if any (PDBQT)")
 			("ligand", value<std::string>(&ligand_name), "ligand (PDBQT)")
+			("buffer", value<std::string>(&ligand_buffer), "ligand buffer")
 		;
 		//options_description search_area("Search area (required, except with --score_only)");
 		options_description search_area("Search space (required)");
@@ -542,9 +617,9 @@ Thank you!\n";
 				.options(desc)
 				.style(command_line_style::default_style ^ command_line_style::allow_guessing)
 				.positional(positional)
-				.run(), 
+				.run(),
 				vm);
-			notify(vm); 
+			notify(vm);
 		}
 		catch(boost::program_options::error& e) {
 			std::cerr << "Command line parse error: " << e.what() << '\n' << "\nCorrect usage:\n" << desc_simple << '\n';
@@ -576,7 +651,7 @@ Thank you!\n";
 		}
 
 		bool search_box_needed = !score_only; // randomize_only and local_only still need the search space
-		bool output_produced   = !score_only; 
+		bool output_produced   = !score_only;
 		bool receptor_needed   = !randomize_only;
 
 		if(receptor_needed) {
@@ -589,16 +664,16 @@ Thank you!\n";
 			std::cerr << "Missing ligand.\n" << "\nCorrect usage:\n" << desc_simple << '\n';
 			return 1;
 		}
-		if(cpu < 1) 
+		if(cpu < 1)
 			cpu = 1;
-		if(vm.count("seed") == 0) 
+		if(vm.count("seed") == 0)
 			seed = auto_seed();
 		if(exhaustiveness < 1)
 			throw usage_error("exhaustiveness must be 1 or greater");
 		if(num_modes < 1)
 			throw usage_error("num_modes must be 1 or greater");
 		sz max_modes_sz = static_cast<sz>(num_modes);
-		
+
 		boost::optional<std::string> rigid_name_opt;
 		if(vm.count("receptor"))
 			rigid_name_opt = rigid_name;
@@ -614,7 +689,7 @@ Thank you!\n";
 		if(vm.count("log") > 0)
 			log.init(log_name);
 
-		if(search_box_needed) { 
+		if(search_box_needed) {
 			options_occurrence oo = get_occurrence(vm, search_area);
 			if(!oo.all) {
 				check_occurrence(vm, search_area);
@@ -648,7 +723,7 @@ Thank you!\n";
 		weights.push_back(weight_hydrogen);
 		weights.push_back(5 * weight_rot / 0.1 - 1); // linearly maps onto a different range, internally. see everything.cpp
 
-		if(search_box_needed) { 
+		if(search_box_needed) {
 			const fl granularity = 0.375;
 			vec span(size_x,   size_y,   size_z);
 			vec center(center_x, center_y, center_z);
@@ -672,7 +747,7 @@ Thank you!\n";
 			else
 				cpu = 1;
 		}
-		if(cpu < 1) 
+		if(cpu < 1)
 			cpu = 1;
 		if(verbosity > 1 && exhaustiveness < cpu)
 			log << "WARNING: at low exhaustiveness, it may be impossible to utilize all CPUs\n";
@@ -680,16 +755,24 @@ Thank you!\n";
 		doing(verbosity, "Reading input", log);
 
 		model m       = parse_bundle(rigid_name_opt, flex_name_opt, std::vector<std::string>(1, ligand_name));
-			
+
 		boost::optional<model> ref;
 		done(verbosity, log);
-
-		main_procedure(m, ref, 
+        fl* resArray;
+        res* resStruct;
+		resStruct = main_procedure(m, ref,
 					out_name,
 					score_only, local_only, randomize_only, false, // no_cache == false
 					gd, exhaustiveness,
 					weights,
 					cpu, seed, verbosity, max_modes_sz, energy_range, log);
+        std::ofstream myfile;
+		myfile.open ("00K_uff_E=531.34_out.txt");
+        for (int i = 0; i < resStruct->count; i++){
+            myfile << resStruct->pdbqtFormatData[i] << std::endl;
+        }
+        myfile.close();
+
 	}
 	catch(file_error& e) {
 		std::cerr << "\n\nError: could not open " << e.name << " for " << (e.in ? "reading" : "writing") << ".\n";
@@ -714,9 +797,9 @@ Thank you!\n";
 
 	// Errors that shouldn't happen:
 
-	catch(std::exception& e) { 
+	catch(std::exception& e) {
 		std::cerr << "\n\nAn error occurred: " << e.what() << ". " << error_message;
-		return 1; 
+		return 1;
 	}
 	catch(internal_error& e) {
 		std::cerr << "\n\nAn internal error occurred in " << e.file << "(" << e.line << "). " << error_message;
@@ -727,3 +810,437 @@ Thank you!\n";
 		return 1;
 	}
 }
+
+extern "C" {
+    __attribute__ ((visibility ("default")))
+    res* runQvina(int argc, char* argv[]) {
+	using namespace boost::program_options;
+	const std::string version_string = "QuickVina 2.1 (24 Dec, 2017)";
+	const std::string error_message = "\n\n\
+Please contact the author, Dr. Oleg Trott <ot14@columbia.edu>, so\n\
+that this problem can be resolved. The reproducibility of the\n\
+error may be vital, so please remember to include the following in\n\
+your problem report:\n\
+* the EXACT error message,\n\
+* your version of the program,\n\
+* the type of computer system you are running it on,\n\
+* all command line options,\n\
+* configuration file (if used),\n\
+* ligand file as PDBQT,\n\
+* receptor file as PDBQT,\n\
+* flexible side chains file as PDBQT (if used),\n\
+* output file as PDBQT (if any),\n\
+* input (if possible),\n\
+* random seed the program used (this is printed when the program starts).\n\
+\n\
+Thank you!\n";
+
+	const std::string cite_message = "\
+############################################################################\n\
+# If you used Quick Vina 2 in your work, please cite:                      #\n\
+#                                                                          #\n\
+# Amr Alhossary, Stephanus Daniel Handoko, Yuguang Mu, and Chee-Keong Kwoh,#\n\
+# Fast, Accurate, and Reliable Molecular Docking with QuickVina 2,         #\n\
+# Bioinformatics (2015), doi: 10.1093/bioinformatics/btv082                #\n\
+#                                                                          #\n\
+# You are also encouraged to cite Quick Vina 1:                            #\n\
+# Stephanus Daniel Handoko, Xuchang Ouyang, Chinh Tran To Su, Chee Keong   #\n\
+# Kwoh, Yew Soon Ong,                                                      #\n\
+# QuickVina: Accelerating AutoDock Vina Using Gradient-Based Heuristics for#\n\
+# Global Optimization,                                                     #\n\
+# IEEE/ACM Transactions on Computational Biology and Bioinformatics,vol.9, #\n\
+# no. 5, pp. 1266-1272, Sept.-Oct. 2012, doi: 10.1109/TCBB.2012.82         #\n\
+#                                                                          #\n\
+# and original AutoDock Vina paper:                                        #\n\
+# O. Trott, A. J. Olson,                                                   #\n\
+# AutoDock Vina: improving the speed and accuracy of docking with a        #\n\
+# new scoring function, efficient optimization and multithreading,         #\n\
+# Journal of Computational Chemistry 31 (2010) 455-461                     #\n\
+# doi: 10.1002/jcc.21334                                                   #\n\
+############################################################################\n";
+
+	try {
+		std::string rigid_name, ligand_name, flex_name, config_name, out_name, log_name;
+		std::string ligand_buffer = "";
+		std::string output_name = "";
+		fl center_x, center_y, center_z, size_x, size_y, size_z;
+		int cpu = 0, seed, exhaustiveness, verbosity = 2, num_modes = 9;
+		fl energy_range = 2.0;
+
+		// -0.035579, -0.005156, 0.840245, -0.035069, -0.587439, 0.05846
+		fl weight_gauss1      = -0.035579;
+		fl weight_gauss2      = -0.005156;
+		fl weight_repulsion   =  0.840245;
+		fl weight_hydrophobic = -0.035069;
+		fl weight_hydrogen    = -0.587439;
+		fl weight_rot         =  0.05846;
+		bool score_only = false, local_only = false, randomize_only = false, help = false, help_advanced = false, version = false; // FIXME
+        bool buffer = false;
+		positional_options_description positional; // remains empty
+
+		options_description inputs("Input");
+		inputs.add_options()
+			("receptor", value<std::string>(&rigid_name), "rigid part of the receptor (PDBQT)")
+			("flex", value<std::string>(&flex_name), "flexible side chains, if any (PDBQT)")
+			("ligand", value<std::string>(&ligand_name), "ligand (PDBQT)")
+			("buffer", value<std::string>(&ligand_buffer), "ligand buffer")
+		;
+		//options_description search_area("Search area (required, except with --score_only)");
+		options_description search_area("Search space (required)");
+		search_area.add_options()
+			("center_x", value<fl>(&center_x), "X coordinate of the center")
+			("center_y", value<fl>(&center_y), "Y coordinate of the center")
+			("center_z", value<fl>(&center_z), "Z coordinate of the center")
+			("size_x", value<fl>(&size_x), "size in the X dimension (Angstroms)")
+			("size_y", value<fl>(&size_y), "size in the Y dimension (Angstroms)")
+			("size_z", value<fl>(&size_z), "size in the Z dimension (Angstroms)")
+		;
+		//options_description outputs("Output prefixes (optional - by default, input names are stripped of .pdbqt\nare used as prefixes. _001.pdbqt, _002.pdbqt, etc. are appended to the prefixes to produce the output names");
+		options_description outputs("Output (optional)");
+		outputs.add_options()
+			("out", value<std::string>(&output_name), "output models (PDBQT), the default is chosen based on the ligand file name")
+			("log", value<std::string>(&log_name), "optionally, write log file")
+		;
+		options_description advanced("Advanced options (see the manual)");
+		advanced.add_options()
+			("score_only",     bool_switch(&score_only),     "score only - search space can be omitted")
+			("local_only",     bool_switch(&local_only),     "do local search only")
+			("randomize_only", bool_switch(&randomize_only), "randomize input, attempting to avoid clashes")
+			("weight_gauss1", value<fl>(&weight_gauss1)->default_value(weight_gauss1),                "gauss_1 weight")
+			("weight_gauss2", value<fl>(&weight_gauss2)->default_value(weight_gauss2),                "gauss_2 weight")
+			("weight_repulsion", value<fl>(&weight_repulsion)->default_value(weight_repulsion),       "repulsion weight")
+			("weight_hydrophobic", value<fl>(&weight_hydrophobic)->default_value(weight_hydrophobic), "hydrophobic weight")
+			("weight_hydrogen", value<fl>(&weight_hydrogen)->default_value(weight_hydrogen),          "Hydrogen bond weight")
+			("weight_rot", value<fl>(&weight_rot)->default_value(weight_rot),                         "N_rot weight")
+		;
+		options_description misc("Misc (optional)");
+		misc.add_options()
+			("cpu", value<int>(&cpu), "the number of CPUs to use (the default is to try to detect the number of CPUs or, failing that, use 1)")
+			("seed", value<int>(&seed), "explicit random seed")
+			("exhaustiveness", value<int>(&exhaustiveness)->default_value(8), "exhaustiveness of the global search (roughly proportional to time): 1+")
+			("num_modes", value<int>(&num_modes)->default_value(9), "maximum number of binding modes to generate")
+			("energy_range", value<fl>(&energy_range)->default_value(3.0), "maximum energy difference between the best binding mode and the worst one displayed (kcal/mol)")
+		;
+		options_description config("Configuration file (optional)");
+		config.add_options()
+			("config", value<std::string>(&config_name), "the above options can be put here")
+		;
+		options_description info("Information (optional)");
+		info.add_options()
+			("help",          bool_switch(&help), "display usage summary")
+			("help_advanced", bool_switch(&help_advanced), "display usage summary with advanced options")
+			("version",       bool_switch(&version), "display program version")
+		;
+		options_description desc, desc_config, desc_simple;
+		desc       .add(inputs).add(search_area).add(outputs).add(advanced).add(misc).add(config).add(info);
+		desc_config.add(inputs).add(search_area).add(outputs).add(advanced).add(misc);
+		desc_simple.add(inputs).add(search_area).add(outputs).add(misc).add(config).add(info);
+
+		variables_map vm;
+		try {
+			//store(parse_command_line(argc, argv, desc, command_line_style::default_style ^ command_line_style::allow_guessing), vm);
+			store(command_line_parser(argc, argv)
+				.options(desc)
+				.style(command_line_style::default_style ^ command_line_style::allow_guessing)
+				.positional(positional)
+				.run(),
+				vm);
+			notify(vm);
+		}
+		catch(boost::program_options::error& e) {
+            res* resStruct = (res*)(malloc(sizeof(res)));
+            resStruct->count = -1;
+            std::string str = "\nCommand line parse error: ";
+            str.append(e.what());
+            resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+            resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+            std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+            return resStruct;
+		}
+		if(vm.count("config")) {
+			try {
+				path name = make_path(config_name);
+				ifile config_stream(name);
+				store(parse_config_file(config_stream, desc_config), vm);
+				notify(vm);
+			}
+			catch(boost::program_options::error& e) {
+			    res* resStruct = (res*)(malloc(sizeof(res)));
+                resStruct->count = -1;
+                std::string str = "\nConfiguration file parse error: ";
+                str.append(e.what());
+                str.append("Correct usage: ");
+                str.append(std::to_string(desc_simple.m_default_line_length));
+                resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+                resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+                std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+                return resStruct;
+			}
+		}
+		if(help) {
+			std::cout << desc_simple << '\n';
+            exit(0);
+		}
+		if(help_advanced) {
+			std::cout << desc << '\n';
+            exit(0);
+		}
+		if(version) {
+			std::cout << version_string << '\n';
+            exit(0);
+		}
+
+		bool search_box_needed = !score_only; // randomize_only and local_only still need the search space
+		bool output_produced   = !score_only;
+		bool receptor_needed   = !randomize_only;
+
+		if(receptor_needed) {
+			if(vm.count("receptor") <= 0) {
+                res* resStruct = (res*)(malloc(sizeof(res)));
+                resStruct->count = -1;
+                std::string str = "\nMissing receptor.\nCorrect usage:\n";
+                str.append(std::to_string(desc_simple.m_default_line_length));
+                resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+                resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+                std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+                return resStruct;
+			}
+		}
+		/*if(vm.count("ligand") <= 0) {
+            res* resStruct = (res*)(malloc(sizeof(res)));
+            resStruct->count = -1;
+            std::string str = "\nMissing ligand.\nCorrect usage:\n";
+            str.append(std::to_string(desc_simple.m_default_line_length));
+            resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+            resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+            std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+            return resStruct;
+		}*/
+		if(cpu < 1)
+			cpu = 1;
+		if(vm.count("seed") == 0)
+			seed = auto_seed();
+		if(exhaustiveness < 1)
+			throw usage_error("exhaustiveness must be 1 or greater");
+		if(num_modes < 1)
+			throw usage_error("num_modes must be 1 or greater");
+		sz max_modes_sz = static_cast<sz>(num_modes);
+
+		boost::optional<std::string> rigid_name_opt;
+		if(vm.count("receptor"))
+			rigid_name_opt = rigid_name;
+
+		boost::optional<std::string> flex_name_opt;
+		if(vm.count("flex"))
+			flex_name_opt = flex_name;
+
+		if(vm.count("flex") && !vm.count("receptor"))
+			throw usage_error("Flexible side chains are not allowed without the rest of the receptor"); // that's the only way parsing works, actually
+
+		tee log;
+		if(vm.count("log") > 0)
+			log.init(log_name);
+
+		if(search_box_needed) {
+			options_occurrence oo = get_occurrence(vm, search_area);
+			if(!oo.all) {
+				check_occurrence(vm, search_area);
+                res* resStruct = (res*)(malloc(sizeof(res)));
+                resStruct->count = -1;
+                std::string str = "\nCorrect usage:\n";
+                str.append(std::to_string(desc_simple.m_default_line_length));
+                resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+                resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+                std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+                return resStruct;
+			}
+			if(size_x <= 0 || size_y <= 0 || size_z <= 0)
+				throw usage_error("Search space dimensions should be positive");
+		}
+
+		log << cite_message << '\n';
+
+		if(search_box_needed && size_x * size_y * size_z > 27e3) {
+			log << "WARNING: The search space volume > 27000 Angstrom^3 (See FAQ)\n";
+		}
+
+
+
+		grid_dims gd; // n's = 0 via default c'tor
+
+		flv weights;
+		weights.push_back(weight_gauss1);
+		weights.push_back(weight_gauss2);
+		weights.push_back(weight_repulsion);
+		weights.push_back(weight_hydrophobic);
+		weights.push_back(weight_hydrogen);
+		weights.push_back(5 * weight_rot / 0.1 - 1); // linearly maps onto a different range, internally. see everything.cpp
+
+		if(search_box_needed) {
+			const fl granularity = 0.375;
+			vec span(size_x,   size_y,   size_z);
+			vec center(center_x, center_y, center_z);
+			VINA_FOR_IN(i, gd) {
+				gd[i].n = sz(std::ceil(span[i] / granularity));
+				fl real_span = granularity * gd[i].n;
+				gd[i].begin = center[i] - real_span/2;
+				gd[i].end = gd[i].begin + real_span;
+			}
+		}
+		if(vm.count("cpu") == 0) {
+			unsigned num_cpus = boost::thread::hardware_concurrency();
+			if(verbosity > 1) {
+				if(num_cpus > 0)
+					log << "Detected " << num_cpus << " CPU" << ((num_cpus > 1) ? "s" : "") << '\n';
+				else
+					log << "Could not detect the number of CPUs, using 1\n";
+			}
+			if(num_cpus > 0)
+				cpu = num_cpus;
+			else
+				cpu = 1;
+		}
+		if(cpu < 1)
+			cpu = 1;
+		if(verbosity > 1 && exhaustiveness < cpu)
+			log << "WARNING: at low exhaustiveness, it may be impossible to utilize all CPUs\n";
+
+		doing(verbosity, "Reading input", log);
+        model m = parse_receptor_pdbqt(make_path(rigid_name_opt.get()));
+		if (ligand_buffer == ""){
+            m.append(parse_ligand_pdbqt(make_path(ligand_name)));
+		} else{
+            m.append(parse_ligand_buffer(ligand_buffer));
+		}
+
+
+		boost::optional<model> ref;
+		done(verbosity, log);
+
+		fl result=0;
+        res* resStruct;// = (fl*)malloc(100*sizeof(fl));
+		resStruct = main_procedure(m, ref,
+					output_name,
+					score_only, local_only, randomize_only, false, // no_cache == false
+					gd, exhaustiveness,
+					weights,
+					cpu, seed, verbosity, max_modes_sz, energy_range, log);
+
+		return(resStruct);
+	}
+	catch(file_error& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nError: could not open ";
+        str.append(e.name.string());
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+	catch(boost::filesystem::filesystem_error& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nFile system error: ";
+        str.append(e.what());
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+	catch(usage_error& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nUsage error: ";
+        str.append(e.what());
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+	catch(parse_error& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nParse error on line ";
+        str.append(std::to_string(e.line));
+        str.append(" in file ");
+        str.append(e.file.string());
+        str.append(": ");
+        str.append(e.reason);
+        str.append("\n");
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+	catch(std::bad_alloc&) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nError: insufficient memory!\n";
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+
+	// Errors that shouldn't happen:
+
+	catch(std::exception& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nAn error occurred: ";
+        str.append(e.what());
+        str.append(". ");
+        str.append(error_message);
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+	catch(internal_error& e) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nAn internal error occurred in ";
+        str.append(e.file);
+        str.append("(");
+        str.append(std::to_string(e.line));
+        str.append("). ");
+        str.append(error_message);
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+	}
+    catch(...) {
+        res* resStruct = (res*)(malloc(sizeof(res)));
+        resStruct->count = -1;
+        std::string str = "\nAn unknown error occurred. ";
+        str.append(error_message);
+        resStruct->pdbqtFormatData = (char**)(malloc(1*sizeof(char *)));
+        resStruct->pdbqtFormatData[0] = (char*)(malloc((str.length()+1)*sizeof(char)));
+        std::strcpy(resStruct->pdbqtFormatData[0], str.c_str());
+        return resStruct;
+    }
+}
+__attribute__ ((visibility ("default")))
+void crash(){
+        *(int*)0 = 1;
+    };
+__attribute__ ((visibility ("default")))
+void freemem(res* result){
+    if (result->count != -1){
+        free(result->len);
+        for (int i = 0; i < result->count; i++) {
+            free(result->pdbqtFormatData[i]);
+            free(result->resArray[i]);
+        }
+        free(result->pdbqtFormatData);
+        free(result->resArray);
+    } else {
+        free(result->pdbqtFormatData[0]);
+        free(result->pdbqtFormatData);
+    }
+    free(result);
+}
+}
+//--receptor /Users/homry/Downloads/2hnt.pdbqt --ligand /Users/homry/Downloads/00K_uff_E=531.34.pdbqt --config /Users/homry/Downloads/conf.txt
