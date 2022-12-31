@@ -10,3 +10,16 @@ It is also witnessed that QVina 2 is more accurate than GOLD 5.2 and is only sli
 to cite Quick Vina 2 please cite:
 
 Amr Alhossary, Stephanus Daniel Handoko, Yuguang Mu, and Chee-Keong Kwoh. "Fast, Accurate, and Reliable Molecular Docking with QuickVina 2". Bioinformatics first published online February 24, 2015 doi:10.1093/bioinformatics/btv082
+
+## Bundle
+
+This fork of QuickVina 2 adds changes that allow it to run as a part of Quantori DockingFactory. The head project of DockingFactory is [DockingFactory Bundle](https://github.com/quantori/scip-dockingfactory-bundle). Other projects that are also parts of the bundle are:
+- [DockingFactory](https://github.com/quantori/scip-dockingfactory)
+- [DockingInterface](https://github.com/quantori/scip-dockinginterface)
+- [Vina](https://github.com/quantori/scip-vina)
+- [Smina](https://github.com/quantori/scip-smina)
+- [rDock](https://github.com/quantori/scip-rdock)
+
+## License
+
+Quick Vina 2 is released under [Apache License, Version 2.0](LICENSE)
